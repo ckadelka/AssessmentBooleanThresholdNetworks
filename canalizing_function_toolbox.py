@@ -1556,6 +1556,86 @@ def random_k_canalizing_with_specific_layerstructure(n, layerstructure, EXACT_DE
             counter_non_canalized_positions += 1
     return f
 
+def random_k_canalizing_with_specific_layerstructure_inputtypes_outputs(n, layerstructure, input_types = None, first_output = None, EXACT_DEPTH_K=False, left_side_of_truth_table=[]):
+    """
+    Generate a random Boolean function in n variables with a specified canalizing layer structure.
+
+    The layer structure is given as a list [k_1, ..., k_r], where each k_i indicates the number of canalizing variables 
+    in that layer. If the function is fully canalizing (i.e. sum(layerstructure) == n and n > 1), the last layer must have at least 2 variables.
+
+    Parameters:
+        n (int): Total number of variables.
+        layerstructure (list): List [k_1, ..., k_r] describing the canalizing layer structure.
+                               Each k_i ≥ 1, and if sum(layerstructure) == n and n > 1, then layerstructure[-1] ≥ 2.
+        EXACT_DEPTH_K (bool, optional): If True, enforce that the canalizing depth is exactly sum(layerstructure) (default is False).
+        left_side_of_truth_table (optional): Precomputed left-hand side of the truth table for speed-up.
+
+    Returns:
+        np.array: Boolean function as an array of length 2^n (truth table).
+    
+    References:
+        [1] He, Q., & Macauley, M. (2016). Stratification and enumeration of Boolean functions by canalizing depth.
+            Physica D: Nonlinear Phenomena, 314, 1-8.
+        [2] Kadelka, C., Kuipers, J., & Laubenbacher, R. (2017). The influence of canalization on the robustness 
+            of Boolean networks. Physica D: Nonlinear Phenomena, 353, 39-47.
+    """
+    k = sum(layerstructure)  # canalizing depth
+    if k == 0:
+        layerstructure = [0]
+    try:
+        assert (n - k != 1 or EXACT_DEPTH_K == False)
+    except AssertionError:
+        print('Error:\nThere are no functions of exact canalizing depth n-1.\nEither set EXACT_DEPTH_K=False or ensure k=sum(layerstructure)!=n.')
+        return
+    try:
+        assert 0 <= k and k <= n
+    except AssertionError:
+        print('Error:\nEnsure 0 <= k = sum(layerstructure) <= n.')
+        return
+    try:
+        assert k < n or layerstructure[-1] > 1 or n == 1
+    except AssertionError:
+        print('Error:\nThe last layer of an n-canalizing function (NCF) has to have size >= 2 for n > 1.\nIf k=sum(layerstructure)=n, ensure that layerstructure[-1]>=2.')
+        return
+    try:
+        assert min(layerstructure) >= 1
+    except AssertionError:
+        print('Error:\nEach layer must have at least one variable (each element of layerstructure must be >= 1).')
+        return
+    if left_side_of_truth_table == []:  # to decrease run time, this should be computed once and then passed as argument
+        left_side_of_truth_table = list(itertools.product([0, 1], repeat=n))
+    num_values = 2**n
+
+    b0 = np.random.randint(2) if first_output is None else first_output
+    bbs = [b0] * layerstructure[0]  # canalized outputs for first layer
+    for i in range(1, len(layerstructure)):
+        if i % 2 == 0:
+            bbs.extend([b0] * layerstructure[i])
+        else:
+            bbs.extend([1 - b0] * layerstructure[i])
+    if input_types is None:
+        aas = np.random.randint(2, size=k)  # canalizing inputs
+    else:
+        aas = np.array([el if input_type=='+' else 1-el for el,input_type in zip(bbs,input_types)])
+    can_vars = np.arange(k)
+    f = np.zeros(num_values, dtype=int)
+    if k < n:
+        if EXACT_DEPTH_K:
+            core_polynomial = random_non_canalizing_non_degenerated_function(n - k)
+        else:
+            core_polynomial = random_non_degenerated_function(n - k)
+    else:
+        core_polynomial = [1 - bbs[-1]]
+    counter_non_canalized_positions = 0
+    for i in range(num_values):
+        for j in range(k):
+            if left_side_of_truth_table[i][can_vars[j]] == aas[j]:
+                f[i] = bbs[j]
+                break
+        else:
+            f[i] = core_polynomial[counter_non_canalized_positions]
+            counter_non_canalized_positions += 1
+    return f
 
 def random_adj_matrix(N, ns, NO_SELF_REGULATION=True, STRONGLY_CONNECTED=False):
     """
@@ -2113,7 +2193,8 @@ def get_derrida_value(F, I, nsim):
 
 
 def get_steady_states_asynchronous(F, I, N, nsim=500, EXACT=False, left_side_of_truth_table=[], 
-                                   initial_sample_points=[], search_depth=50, SEED=-1, DEBUG=True):
+                                   initial_sample_points=[], search_depth=50, SEED=-1, DEBUG=False,
+                                   INITIAL_SAMPLE_POINTS_AS_BINARY_VECTORS=True):
     """
     Compute the steady states of a Boolean network under asynchronous updates.
 
@@ -2138,6 +2219,8 @@ def get_steady_states_asynchronous(F, I, N, nsim=500, EXACT=False, left_side_of_
         search_depth (int, optional): Maximum number of asynchronous update iterations to attempt per simulation.
         SEED (int, optional): Random seed. If SEED is -1, a random seed is generated.
         DEBUG (bool, optional): If True, print debugging information during simulation.
+        INITIAL_SAMPLE_POINTS_AS_BINARY_VECTORS (bool, optional): If True, initial_sample_points are provided as binary vectors;
+                                                                  if False, they are given as decimal numbers. Default is True.
 
     Returns:
         tuple: A tuple containing:
@@ -2169,18 +2252,26 @@ def get_steady_states_asynchronous(F, I, N, nsim=500, EXACT=False, left_side_of_
     basin_sizes = []
     steady_state_dict = dict()   
     
+    INITIAL_SAMPLE_POINTS_EMPTY = check_if_empty(initial_sample_points)
+    if not INITIAL_SAMPLE_POINTS_EMPTY:
+        nsim = len(initial_sample_points)
+    
     for iteration in range(nsim if not EXACT else 2**N):
         if EXACT:
             x = left_side_of_truth_table[iteration]
             xdec = iteration
         else:
-            if initial_sample_points == []:  # generate random initial states on the fly
+            if INITIAL_SAMPLE_POINTS_EMPTY:
                 x = np.random.randint(2, size=N)
                 xdec = bin2dec(x)
                 sampled_points.append(xdec)
-            else:                
-                x = initial_sample_points[iteration]
-                xdec = bin2dec(x)
+            else:
+                if INITIAL_SAMPLE_POINTS_AS_BINARY_VECTORS:
+                    x = initial_sample_points[iteration]
+                    xdec = bin2dec(x)
+                else:
+                    xdec = initial_sample_points[iteration]
+                    x = np.array(dec2bin(xdec, N))
         
         if DEBUG:
             print(iteration, -1, -1, False, xdec, x)
@@ -2230,10 +2321,176 @@ def get_steady_states_asynchronous(F, I, N, nsim=500, EXACT=False, left_side_of_
             print()
     if sum(basin_sizes) < (nsim if not EXACT else 2**N):
         print('Warning: only %i of the %i tested initial conditions eventually reached a steady state. Try increasing the search depth. '
-              'It may however also be the case that your asynchronous state space contains a limit cycle.' %
+              'It may however also be the case that your asynchronous state space contains a complex attractor.' %
               (sum(basin_sizes), nsim if not EXACT else 2**N))
     return (steady_states, len(steady_states), basin_sizes, steady_state_dict, dictF, SEED,
             initial_sample_points if initial_sample_points != [] else sampled_points)
+
+
+def get_attractors_asynchronous(F, I, N, nsim=500, EXACT=False, left_side_of_truth_table=[], 
+                                   initial_sample_points=[], record_after_this_many_updates = 50, search_depth=200, SEED=-1, DEBUG=False,
+                                   INITIAL_SAMPLE_POINTS_AS_BINARY_VECTORS=True):
+    """
+    Compute the steady states of a Boolean network under asynchronous updates.
+
+    This function simulates asynchronous updates of a Boolean network (with N nodes)
+    for a given number of initial conditions (nsim). For each initial state, the network
+    is updated asynchronously until a steady state (or attractor) is reached or until a maximum
+    search depth is exceeded. The simulation can be performed either approximately (by sampling nsim
+    random initial conditions) or exactly (by iterating over the entire state space when EXACT=True).
+
+    Parameters:
+        F (list): List of Boolean functions (truth tables) for each node.
+                 Each function is defined over 2^(# of regulators) entries.
+        I (list): List of lists, where I[i] contains the indices of the regulators for node i.
+        N (int): Total number of nodes in the network.
+        nsim (int, optional): Number of initial conditions to simulate (default is 500).
+        EXACT (bool, optional): If True, iterate over the entire state space (2^N initial conditions);
+                                otherwise, use nsim random initial conditions. (Default is False.)
+        left_side_of_truth_table (list, optional): Precomputed truth table (list of tuples) for N inputs.
+                                                     Used only if EXACT is True.
+        initial_sample_points (list, optional): List of initial states (as binary vectors) to use.
+                                                  If provided and EXACT is False, these override random sampling.
+        record_after_this_many_updates (int, optional): Number of initial updates after which the visited states are recorded as they likely are part of a complex attractor. 
+        search_depth (int, optional): Maximum number of asynchronous update iterations to attempt per simulation.
+        SEED (int, optional): Random seed. If SEED is -1, a random seed is generated.
+        DEBUG (bool, optional): If True, print debugging information during simulation.
+        INITIAL_SAMPLE_POINTS_AS_BINARY_VECTORS (bool, optional): If True, initial_sample_points are provided as binary vectors;
+                                                                  if False, they are given as decimal numbers. Default is True.
+
+    Returns:
+        tuple: A tuple containing:
+            - steady_states (list): List of steady state values (in decimal form) found.
+            - number_of_steady_states (int): Total number of unique steady states.
+            - basin_sizes (list): List of counts showing how many initial conditions converged to each steady state.
+            - steady_state_dict (dict): Dictionary mapping a steady state (in decimal) to its index in the steady_states list.
+            - dictF (dict): Dictionary caching state transitions. Keys are tuples (xdec, i) and values are the updated state.
+            - SEED (int): The random seed used for the simulation.
+            - initial_sample_points (list): The list of initial sample points used (if provided) or those generated during simulation.
+    """
+    if EXACT and left_side_of_truth_table == []:
+        left_side_of_truth_table = list(map(np.array, list(itertools.product([0, 1], repeat=N))))
+
+    sampled_points = []
+    
+    assert initial_sample_points == [] or not EXACT, (
+        "Warning: sample points were provided but, with option EXACT==True, the entire state space is computed "
+        "(and initial sample points ignored)"
+    )
+    
+    assert search_depth > record_after_this_many_updates, (
+        "Warning: At least some states must be recorded: search_depth > record_after_this_many_updates required"
+    )
+    
+    if SEED == -1:
+        SEED = int(random.random() * 2**31)
+    
+    np.random.seed(SEED)
+    
+    dictF = dict()
+    steady_states = []
+    basin_sizes = []
+    steady_state_dict = dict()  
+    
+    likely_attracting_states = []
+    likely_attracting_state_dict = dict()
+    weight = 1/(search_depth - record_after_this_many_updates)
+    
+    INITIAL_SAMPLE_POINTS_EMPTY = check_if_empty(initial_sample_points)
+    if not INITIAL_SAMPLE_POINTS_EMPTY:
+        nsim = len(initial_sample_points)
+    
+    for iteration in range(nsim if not EXACT else 2**N):
+        if EXACT:
+            x = left_side_of_truth_table[iteration]
+            xdec = iteration
+        else:
+            if INITIAL_SAMPLE_POINTS_EMPTY:
+                x = np.random.randint(2, size=N)
+                xdec = bin2dec(x)
+                sampled_points.append(xdec)
+            else:
+                if INITIAL_SAMPLE_POINTS_AS_BINARY_VECTORS:
+                    x = initial_sample_points[iteration]
+                    xdec = bin2dec(x)
+                else:
+                    xdec = initial_sample_points[iteration]
+                    x = np.array(dec2bin(xdec, N))
+        
+        if DEBUG:
+            print(iteration, -1, -1, False, xdec, x)
+        queue = []
+        for jj in range(search_depth):  # update until a steady state is reached or search_depth is exceeded
+            FOUND_NEW_STATE = False
+            try:
+                # Check if this state is already recognized as a steady state.
+                index_ss = steady_state_dict[xdec]
+            except KeyError:
+                # Asynchronously update the state until a new state is found.
+                update_order_to_try = np.random.permutation(N)
+                for i in update_order_to_try:
+                    try:
+                        fxdec = dictF[(xdec, i)]
+                        if fxdec != xdec:
+                            FOUND_NEW_STATE = True
+                            x[i] = 1 - x[i]
+                    except KeyError:
+                        fx_i = update_single_node(F[i], x[I[i]])
+                        if fx_i > x[i]:
+                            fxdec = xdec + 2**(N - 1 - i)
+                            x[i] = 1
+                            FOUND_NEW_STATE = True
+                        elif fx_i < x[i]:
+                            fxdec = xdec - 2**(N - 1 - i)
+                            x[i] = 0
+                            FOUND_NEW_STATE = True
+                        else:
+                            fxdec = xdec
+                        dictF.update({(xdec, i): fxdec})
+                    if FOUND_NEW_STATE:
+                        xdec = fxdec
+                        break
+                if DEBUG:
+                    print(iteration, jj, i, FOUND_NEW_STATE, xdec, x)
+            if FOUND_NEW_STATE == False:  # steady state reached
+                try: #add the steady state to the list of steady states
+                    index_ss = steady_state_dict[xdec]
+                except KeyError:
+                    steady_state_dict.update({xdec: len(steady_states)})
+                    steady_states.append(xdec)
+                try:
+                    index_attr = likely_attracting_state_dict[xdec]
+                    basin_sizes[index_attr] += 1
+                    break
+                except KeyError:
+                    likely_attracting_state_dict.update({xdec: len(likely_attracting_states)})
+                    likely_attracting_states.append(xdec)
+                    basin_sizes.append(1)
+                    break
+            elif jj >= record_after_this_many_updates:
+                queue.append(xdec)
+                if jj == search_depth-1: #only if the end of the simulation is reached and no steady state was found, do we add the likely attractor states.
+                    #assign weight to each state in queue
+                    for xdec in queue:
+                        try:
+                            index_attr = likely_attracting_state_dict[xdec]
+                            basin_sizes[index_attr] += weight
+                        except KeyError:
+                            likely_attracting_state_dict.update({xdec: len(likely_attracting_states)})
+                            likely_attracting_states.append(xdec)
+                            basin_sizes.append(weight)
+                            
+                        
+                
+
+    if round(sum(basin_sizes),2) < (nsim if not EXACT else 2**N):
+        print('Warning: only %i of the %i tested initial conditions eventually reached a steady state. Try increasing the search depth. '
+              'It may however also be the case that your asynchronous state space contains a complex attractor.' %
+              (sum(basin_sizes), nsim if not EXACT else 2**N))
+    return (steady_states, len(steady_states), likely_attracting_states, len(likely_attracting_states), 
+            basin_sizes, likely_attracting_state_dict, dictF, SEED,
+            initial_sample_points if initial_sample_points != [] else sampled_points)
+
 
 
 def get_steady_states_asynchronous_given_one_initial_condition(F, I, nsim=500, stochastic_weights=[], initial_condition=0, search_depth=50, SEED=-1, DEBUG=False):
